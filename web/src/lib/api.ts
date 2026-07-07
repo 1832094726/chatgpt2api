@@ -921,3 +921,153 @@ export async function testProxyClearance(targetUrl?: string) {
     body: { target_url: targetUrl ?? "https://chatgpt.com" },
   });
 }
+
+// ── HLOOL Mail ──────────────────────────────────────────────────────
+
+export type HLOOLDomainsResponse = {
+  success?: boolean;
+  data?: {
+    public_domains?: string[];
+    private_domains?: string[];
+    domains?: string[];
+  };
+  error?: string | null;
+  usage?: Record<string, string>;
+};
+
+export type HLOOLMailbox = {
+  id: number | string;
+  email: string;
+  domain?: string;
+  created_at?: string;
+};
+
+export type HLOOLMailboxesResponse = {
+  success?: boolean;
+  data?: {
+    items?: HLOOLMailbox[];
+    page?: number;
+    per_page?: number;
+    total?: number;
+    total_pages?: number;
+  };
+  error?: string | null;
+};
+
+export type HLOOLGenerateResponse = {
+  success?: boolean;
+  data?: {
+    email?: string;
+    reuse?: boolean;
+    domain?: string;
+    share?: {
+      url?: string;
+      access_url?: string;
+    };
+  };
+  error?: string | null;
+};
+
+export type HLOOLEmailMessage = {
+  id: string;
+  subject?: string;
+  from_address?: string;
+  preview?: string;
+  text_content?: string;
+  html_content?: string;
+  created_at?: string;
+};
+
+export type HLOOLEmailsResponse = {
+  success?: boolean;
+  data?: {
+    items?: HLOOLEmailMessage[];
+    page?: number;
+    per_page?: number;
+    total?: number;
+    total_pages?: number;
+  };
+  error?: string | null;
+};
+
+export type HLOOLNextEmailResponse = {
+  success?: boolean;
+  data?: {
+    has_email?: boolean;
+    message?: HLOOLEmailMessage;
+  };
+  error?: string | null;
+};
+
+export type HLOOLReadEmailResponse = {
+  success?: boolean;
+  data?: HLOOLEmailMessage & { attachments?: unknown[]; headers?: Record<string, string> };
+  error?: string | null;
+};
+
+export type HLOOLDeleteResponse = {
+  success?: boolean;
+  data?: Record<string, unknown>;
+  error?: string | null;
+};
+
+type HLOOLBasePayload = {
+  api_key: string;
+  api_base?: string;
+};
+
+export async function fetchHLOOLDomains(payload: HLOOLBasePayload) {
+  return httpRequest<HLOOLDomainsResponse>("/api/hlool-mail/domains", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function generateHLOOLMailbox(payload: HLOOLBasePayload & { payload?: { prefix?: string; domain?: string; share?: boolean } }) {
+  return httpRequest<HLOOLGenerateResponse>("/api/hlool-mail/generate", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function fetchHLOOLMailboxes(payload: HLOOLBasePayload & { page?: number; per_page?: number; q?: string }) {
+  return httpRequest<HLOOLMailboxesResponse>("/api/hlool-mail/mailboxes", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function deleteHLOOLMailbox(payload: HLOOLBasePayload & { id: number | string }) {
+  return httpRequest<HLOOLDeleteResponse>("/api/hlool-mail/mailboxes/delete", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function fetchHLOOLEmails(payload: HLOOLBasePayload & { email: string; page?: number; per_page?: number }) {
+  return httpRequest<HLOOLEmailsResponse>("/api/hlool-mail/emails", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function fetchHLOOLNextEmail(payload: HLOOLBasePayload & { email: string }) {
+  return httpRequest<HLOOLNextEmailResponse>("/api/hlool-mail/emails/next", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function readHLOOLEmail(payload: HLOOLBasePayload & { id: string }) {
+  return httpRequest<HLOOLReadEmailResponse>("/api/hlool-mail/emails/read", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function clearHLOOLEmails(payload: HLOOLBasePayload & { email: string }) {
+  return httpRequest<HLOOLDeleteResponse>("/api/hlool-mail/emails/clear", {
+    method: "POST",
+    body: payload,
+  });
+}
