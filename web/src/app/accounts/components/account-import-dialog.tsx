@@ -71,18 +71,40 @@ function getAccountJsonAccount(value: unknown): AccountImportPayload | null {
     return null;
   }
   const raw = value as Record<string, unknown>;
-  const tokenValue = raw.access_token ?? raw.accessToken;
+  const credentials = raw.credentials && typeof raw.credentials === "object" && !Array.isArray(raw.credentials)
+    ? raw.credentials as Record<string, unknown>
+    : null;
+  const tokenValue = raw.access_token ?? raw.accessToken ?? credentials?.access_token ?? credentials?.accessToken;
   const token = typeof tokenValue === "string" ? tokenValue.trim() : "";
   if (!token) {
     return null;
   }
 
-  const payload: AccountImportPayload = {
-    ...raw,
-    access_token: token,
-    source_type: "codex",
-  };
+  const payload: AccountImportPayload = credentials
+    ? {
+      ...credentials,
+      name: raw.name,
+      platform: raw.platform,
+      sub2api_type: raw.type,
+      concurrency: raw.concurrency,
+      priority: raw.priority,
+      rate_multiplier: raw.rate_multiplier,
+      auto_pause_on_expired: raw.auto_pause_on_expired,
+      extra: raw.extra,
+      access_token: token,
+      account_id: credentials.account_id ?? credentials.chatgpt_account_id,
+      user_id: credentials.user_id ?? credentials.chatgpt_user_id,
+      type: credentials.plan_type,
+      export_type: "sub2api",
+      source_type: "sub2api",
+    }
+    : {
+      ...raw,
+      access_token: token,
+      source_type: "codex",
+    };
   delete payload.accessToken;
+  delete payload.credentials;
   if (payload.type === "codex") {
     payload.export_type = "codex";
     delete payload.type;
@@ -656,8 +678,8 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             <div className="space-y-2">
               <div className="text-sm font-medium text-stone-800">选择本地账号 JSON 文件</div>
               <div className="text-sm leading-6 text-stone-500">
-                支持本项目导出的单账号对象或全部账号数组，也兼容每个文件一个账号对象的 CPA JSON。
-                系统会自动提取 `access_token` 或 `accessToken`。
+                支持本项目导出的单账号对象或全部账号数组，也兼容 CPA JSON 与 Sub2API 导出的账号 JSON。
+                系统会自动提取 `access_token`、`accessToken` 或 `credentials.access_token`。
               </div>
             </div>
             <Button
@@ -740,7 +762,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
         />
         <MethodCard
           title="导入账号 JSON 文件"
-          description="支持本项目导出的单账号 JSON 或全部账号数组，也兼容 CPA JSON 文件。"
+          description="支持本项目导出的账号 JSON，也兼容 CPA JSON 与 Sub2API 账号导出文件。"
           icon={Files}
           onClick={() => setMethod("account-json")}
         />

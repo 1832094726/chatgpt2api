@@ -1084,7 +1084,11 @@ class AccountService:
 
     @staticmethod
     def _account_payload_token(item: dict) -> str:
-        return str(item.get("access_token") or item.get("accessToken") or "").strip()
+        token = item.get("access_token") or item.get("accessToken") or ""
+        if not token and isinstance(item.get("credentials"), dict):
+            credentials = item["credentials"]
+            token = credentials.get("access_token") or credentials.get("accessToken") or ""
+        return str(token).strip()
 
     @staticmethod
     def _prepare_account_payload(item: dict) -> dict | None:
@@ -1093,9 +1097,26 @@ class AccountService:
         access_token = AccountService._account_payload_token(item)
         if not access_token:
             return None
-        payload = dict(item)
+
+        credentials = item.get("credentials") if isinstance(item.get("credentials"), dict) else None
+        if credentials is not None:
+            payload = dict(credentials)
+            payload["source_type"] = "sub2api"
+            payload["export_type"] = "sub2api"
+            payload["sub2api_type"] = str(item.get("type") or "").strip()
+            for key in ("name", "platform", "concurrency", "priority", "rate_multiplier", "auto_pause_on_expired", "extra"):
+                if key in item:
+                    payload[key] = item[key]
+        else:
+            payload = dict(item)
+
         payload.pop("accessToken", None)
+        payload.pop("credentials", None)
         payload["access_token"] = access_token
+        if payload.get("chatgpt_account_id") and not payload.get("account_id"):
+            payload["account_id"] = str(payload.get("chatgpt_account_id") or "").strip()
+        if payload.get("chatgpt_user_id") and not payload.get("user_id"):
+            payload["user_id"] = str(payload.get("chatgpt_user_id") or "").strip()
         # CPA/Codex 导出文件里的 `type=codex` 是导出格式，不是号池套餐类型。
         if str(payload.get("type") or "").strip().lower() == "codex":
             payload["export_type"] = "codex"
@@ -1103,7 +1124,7 @@ class AccountService:
             payload.pop("type", None)
         if str(payload.get("export_type") or "").strip().lower() == "codex":
             payload["source_type"] = "codex"
-        if payload.get("plan_type") and not payload.get("type"):
+        if payload.get("plan_type"):
             payload["type"] = str(payload.get("plan_type") or "").strip()
         return payload
 

@@ -121,7 +121,11 @@ class OAuthLoginFinishRequest(BaseModel):
 
 
 def _account_payload_token(item: dict[str, Any]) -> str:
-    return str(item.get("access_token") or item.get("accessToken") or "").strip()
+    token = item.get("access_token") or item.get("accessToken") or ""
+    if not token and isinstance(item.get("credentials"), dict):
+        credentials = item["credentials"]
+        token = credentials.get("access_token") or credentials.get("accessToken") or ""
+    return str(token).strip()
 
 
 def _unique_tokens(tokens: list[str]) -> list[str]:

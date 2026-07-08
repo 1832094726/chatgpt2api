@@ -113,6 +113,49 @@ class AccountExportTests(unittest.TestCase):
         self.assertEqual(account["refresh_token"], "rt_test")
         self.assertEqual(account["account_id"], "acct_123")
 
+    def test_add_account_items_accepts_sub2api_export_shape(self) -> None:
+        service = AccountService(MemoryStorage())
+
+        result = service.add_account_items(
+            [
+                {
+                    "name": "#9",
+                    "platform": "openai",
+                    "type": "oauth",
+                    "credentials": {
+                        "access_token": "access_sub2api",
+                        "refresh_token": "rt_sub2api",
+                        "id_token": "id_sub2api",
+                        "email": "sub2api@example.com",
+                        "plan_type": "free",
+                        "chatgpt_account_id": "acct_sub2api",
+                        "chatgpt_user_id": "user_sub2api",
+                        "client_id": "app_test",
+                        "organization_id": "org_test",
+                    },
+                    "extra": {"import_source": "codex_session"},
+                    "concurrency": 10,
+                }
+            ]
+        )
+
+        account = service.get_account("access_sub2api")
+        self.assertEqual(result["added"], 1)
+        self.assertIsNotNone(account)
+        assert account is not None
+        self.assertEqual(account["type"], "free")
+        self.assertEqual(account["source_type"], "sub2api")
+        self.assertEqual(account["export_type"], "sub2api")
+        self.assertEqual(account["sub2api_type"], "oauth")
+        self.assertEqual(account["email"], "sub2api@example.com")
+        self.assertEqual(account["user_id"], "user_sub2api")
+        self.assertEqual(account["account_id"], "acct_sub2api")
+        self.assertEqual(account["refresh_token"], "rt_sub2api")
+        self.assertEqual(account["id_token"], "id_sub2api")
+        self.assertEqual(account["client_id"], "app_test")
+        self.assertEqual(account["organization_id"], "org_test")
+        self.assertEqual(account["extra"], {"import_source": "codex_session"})
+
 
 if __name__ == "__main__":
     unittest.main()
