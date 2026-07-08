@@ -49,6 +49,11 @@ function getStatus(item: SystemLog) {
   return "-";
 }
 
+function getTaskId(item: SystemLog) {
+  const value = item.detail?.task_id;
+  return typeof value === "string" || typeof value === "number" ? String(value) : "";
+}
+
 function LogsContent() {
   const [items, setItems] = useState<SystemLog[]>([]);
   const [type, setType] = useState<string>(LogType.Call);
@@ -206,6 +211,7 @@ function LogsContent() {
               <TableBody>
                 {currentRows.map((item) => {
                   const urls = getUrls(item);
+                  const taskId = getTaskId(item);
                   return (
                     <TableRow key={item.id} className="text-stone-600">
                       <TableCell>
@@ -247,7 +253,10 @@ function LogsContent() {
                           )}
                         </TableCell>
                       ) : null}
-                      <TableCell className="max-w-[420px] truncate text-stone-500">{item.summary || "-"}</TableCell>
+                      <TableCell className="max-w-[420px] text-stone-500">
+                        <div className="truncate">{item.summary || "-"}</div>
+                        {taskId ? <div className="mt-1 truncate text-xs text-stone-400">任务ID：{taskId}</div> : null}
+                      </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1">
                           <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-600" onClick={() => openDetail(item)}>

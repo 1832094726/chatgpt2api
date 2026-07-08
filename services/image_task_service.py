@@ -231,6 +231,15 @@ class ImageTaskService:
             should_start = True
 
         if should_start:
+            self._log_call(
+                identity,
+                mode,
+                _clean(payload.get("model"), "gpt-image-2"),
+                time.time(),
+                "任务已创建",
+                task_id=task_id,
+                request_preview=request_text(payload.get("prompt")),
+            )
             thread = threading.Thread(
                 target=self._run_task,
                 args=(key, mode, payload, dict(identity), _clean(payload.get("model"), "gpt-image-2")),
@@ -249,6 +258,7 @@ class ImageTaskService:
         model: str,
     ) -> None:
         started = time.time()
+        task_id = key.split(":", 1)[1] if ":" in key else key
         self._update_task(key, status=TASK_STATUS_RUNNING, error="")
         # 创建进度回调，每个步骤完成后更新任务状态
         def progress_callback(step: str) -> None:
@@ -283,6 +293,7 @@ class ImageTaskService:
                 model,
                 started,
                 "调用完成",
+                task_id=task_id,
                 request_preview=request_text(payload.get("prompt")),
                 urls=_collect_image_urls(data),
                 account_email=account_email,
@@ -301,6 +312,7 @@ class ImageTaskService:
                 model,
                 started,
                 "调用失败",
+                task_id=task_id,
                 request_preview=request_text(payload.get("prompt")),
                 status="failed",
                 error=error_message,
@@ -315,6 +327,7 @@ class ImageTaskService:
         started: float,
         suffix: str,
         *,
+        task_id: str = "",
         request_preview: str = "",
         status: str = "success",
         error: str = "",
@@ -334,6 +347,8 @@ class ImageTaskService:
             "duration_ms": int((time.time() - started) * 1000),
             "status": status,
         }
+        if task_id:
+            detail["task_id"] = task_id
         if request_preview:
             detail["request_text"] = request_preview
         if error:
@@ -483,6 +498,7 @@ class ImageTaskService:
     ) -> None:
         """后台线程：继续轮询已有 conversation_id 的图片结果。"""
         started = time.time()
+        task_id = key.split(":", 1)[1] if ":" in key else key
         backend = None
         try:
             from services.openai_backend_api import OpenAIBackendAPI
@@ -527,6 +543,7 @@ class ImageTaskService:
                 model,
                 started,
                 "调用完成（续轮询）",
+                task_id=task_id,
                 status="success",
                 urls=_collect_image_urls(data),
             )
@@ -540,6 +557,7 @@ class ImageTaskService:
                 model,
                 started,
                 "调用失败（续轮询）",
+                task_id=task_id,
                 status="failed",
                 error=error_message,
             )
