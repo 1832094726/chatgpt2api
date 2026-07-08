@@ -46,7 +46,17 @@ function getStatus(item: SystemLog) {
   const status = item.detail?.status;
   if (status === "success") return "成功";
   if (status === "failed") return "失败";
+  if (status === "running") return "正在生成";
+  if (status === "queued") return "排队中";
   return "-";
+}
+
+function getStatusVariant(item: SystemLog) {
+  const status = item.detail?.status;
+  if (status === "failed") return "danger";
+  if (status === "running") return "info";
+  if (status === "queued") return "warning";
+  return "success";
 }
 
 function getTaskId(item: SystemLog) {
@@ -223,7 +233,7 @@ function LogsContent() {
                       {isCallLog ? <TableCell>{formatDuration(item)}</TableCell> : null}
                       {isCallLog ? (
                         <TableCell>
-                          <Badge variant={item.detail?.status === "failed" ? "danger" : "success"} className="rounded-md">
+                          <Badge variant={getStatusVariant(item)} className="rounded-md">
                             {getStatus(item)}
                           </Badge>
                         </TableCell>

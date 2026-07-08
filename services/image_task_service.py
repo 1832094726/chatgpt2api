@@ -19,6 +19,10 @@ TASK_STATUS_SUCCESS = "success"
 TASK_STATUS_ERROR = "error"
 TERMINAL_STATUSES = {TASK_STATUS_SUCCESS, TASK_STATUS_ERROR}
 UNFINISHED_STATUSES = {TASK_STATUS_QUEUED, TASK_STATUS_RUNNING}
+TASK_STATUS_LOG_LABELS = {
+    TASK_STATUS_QUEUED: "排队中",
+    TASK_STATUS_RUNNING: "正在生成",
+}
 
 
 def _now_iso() -> str:
@@ -217,11 +221,14 @@ class ImageTaskService:
             task = {
                 "id": task_id,
                 "owner_id": owner,
+                "key_name": _clean(identity.get("name")),
+                "role": _clean(identity.get("role")),
                 "status": TASK_STATUS_QUEUED,
                 "mode": mode,
                 "model": _clean(payload.get("model"), "gpt-image-2"),
                 "size": _clean(payload.get("size")),
                 "quality": _clean(payload.get("quality"), "auto"),
+                "request_text": request_text(payload.get("prompt")),
                 "created_at": now,
                 "updated_at": now,
                 "created_ts": time.time(),
@@ -396,11 +403,14 @@ class ImageTaskService:
             task = {
                 "id": task_id,
                 "owner_id": owner,
+                "key_name": _clean(item.get("key_name")),
+                "role": _clean(item.get("role")),
                 "status": status,
                 "mode": "edit" if item.get("mode") == "edit" else "generate",
                 "model": _clean(item.get("model"), "gpt-image-2"),
                 "size": _clean(item.get("size")),
                 "quality": _clean(item.get("quality"), "auto"),
+                "request_text": _clean(item.get("request_text")),
                 "created_at": _clean(item.get("created_at"), _now_iso()),
                 "updated_at": _clean(item.get("updated_at"), _clean(item.get("created_at"), _now_iso())),
                 "created_ts": item.get("created_ts"),
@@ -450,6 +460,56 @@ class ImageTaskService:
         for key in removed_keys:
             self._tasks.pop(key, None)
         return bool(removed_keys)
+
+    def active_log_items(self, *, start_date: str = "", end_date: str = "") -> list[dict[str, Any]]:
+        """Return unfinished image tasks as transient call-log rows."""
+        with self._lock:
+            tasks = [
+                dict(task)
+                for task in self._tasks.values()
+                if task.get("status") in UNFINISHED_STATUSES
+            ]
+        items: list[dict[str, Any]] = []
+        for task in tasks:
+            updated_at = _clean(task.get("updated_at"), _now_iso())
+            day = updated_at[:10]
+            if start_date and day < start_date:
+                continue
+            if end_date and day > end_date:
+                continue
+            mode = "图生图" if task.get("mode") == "edit" else "文生图"
+            status = _clean(task.get("status"), TASK_STATUS_RUNNING)
+            base_ts = task.get("started_ts") if status == TASK_STATUS_RUNNING else task.get("created_ts")
+            try:
+                elapsed_base = float(base_ts or time.time())
+            except (TypeError, ValueError):
+                elapsed_base = time.time()
+            elapsed_ms = int(max(0.0, time.time() - elapsed_base) * 1000)
+            task_id = _clean(task.get("id"))
+            items.append({
+                "id": f"active-image-task:{_clean(task.get('owner_id'))}:{task_id}",
+                "time": updated_at,
+                "type": LOG_TYPE_CALL,
+                "summary": f"{mode}{TASK_STATUS_LOG_LABELS.get(status, '正在生成')}",
+                "detail": {
+                    "key_id": task.get("owner_id"),
+                    "key_name": task.get("key_name"),
+                    "role": task.get("role"),
+                    "endpoint": "/v1/images/edits" if task.get("mode") == "edit" else "/v1/images/generations",
+                    "model": task.get("model"),
+                    "task_id": task_id,
+                    "started_at": task.get("created_at"),
+                    "ended_at": updated_at,
+                    "duration_ms": elapsed_ms,
+                    "status": status,
+                    "request_text": task.get("request_text"),
+                    "progress": task.get("progress"),
+                    "size": task.get("size"),
+                    "quality": task.get("quality"),
+                },
+            })
+        items.sort(key=lambda item: str(item.get("time") or ""), reverse=True)
+        return items
 
     def resume_poll(
         self,
