@@ -19,10 +19,13 @@ FROM --platform=$TARGETPLATFORM python:3.13-slim AS app
 
 ARG TARGETPLATFORM
 ARG TARGETARCH
+ARG APT_MIRROR=
+ARG PIP_INDEX_URL=https://pypi.org/simple
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    UV_DEFAULT_INDEX=${PIP_INDEX_URL}
 
 WORKDIR /app
 
@@ -30,14 +33,21 @@ WORKDIR /app
 # - git: Git 存储后端需要
 # - libpq-dev: PostgreSQL 客户端库
 # - gcc: 编译 psycopg2-binary 需要
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN if [ -n "$APT_MIRROR" ]; then \
+        . /etc/os-release; \
+        rm -f /etc/apt/sources.list.d/debian.sources; \
+        printf 'deb %s %s main contrib non-free non-free-firmware\n' "$APT_MIRROR" "$VERSION_CODENAME" > /etc/apt/sources.list; \
+        printf 'deb %s %s-updates main contrib non-free non-free-firmware\n' "$APT_MIRROR" "$VERSION_CODENAME" >> /etc/apt/sources.list; \
+        printf 'deb %s-security %s-security main contrib non-free non-free-firmware\n' "$APT_MIRROR" "$VERSION_CODENAME" >> /etc/apt/sources.list; \
+    fi \
+    && apt-get update && apt-get install -y --no-install-recommends \
     git \
     libpq-dev \
     gcc \
     openssl \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir uv
+RUN pip install --no-cache-dir -i "$PIP_INDEX_URL" uv
 
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
