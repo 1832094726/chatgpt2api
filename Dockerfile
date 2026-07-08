@@ -3,11 +3,12 @@ ARG TARGETPLATFORM
 ARG TARGETARCH
 
 FROM --platform=$BUILDPLATFORM node:22-alpine AS web-build
+ARG NPM_REGISTRY=https://registry.npmjs.org/
 
 WORKDIR /app/web
 
 COPY web/package.json web/bun.lock ./
-RUN npm install
+RUN npm install --registry "$NPM_REGISTRY"
 
 COPY VERSION /app/VERSION
 COPY CHANGELOG.md /app/CHANGELOG.md
