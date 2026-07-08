@@ -9,6 +9,7 @@ from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import require_identity, resolve_image_base_url
 from services.content_filter import check_request, request_shape, request_text
 from services.editable_file_task_service import editable_file_task_service
+from services.image_task_service import image_task_service
 from services.log_service import LoggedCall
 from services.protocol import (
     anthropic_v1_messages,
@@ -19,9 +20,11 @@ from services.protocol import (
     openai_v1_response,
     openai_search,
 )
+from utils.helper import new_uuid
 
 
 class ImageGenerationRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
     prompt: str = Field(..., min_length=1)
     model: str = "gpt-image-2"
     n: int = Field(default=1, ge=1, le=4)
@@ -30,6 +33,8 @@ class ImageGenerationRequest(BaseModel):
     response_format: str = "b64_json"
     history_disabled: bool = True
     stream: bool | None = None
+    background: bool = False
+    client_task_id: str | None = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -69,6 +74,10 @@ class EditableFileTaskRequest(BaseModel):
     client_task_id: str | None = None
 
 
+def _parse_ids(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 async def filter_or_log(call: LoggedCall, text: str) -> None:
     try:
         await run_in_threadpool(check_request, text)
@@ -99,7 +108,36 @@ def create_router() -> APIRouter:
         payload["base_url"] = resolve_image_base_url(request)
         call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_text=body.prompt)
         await filter_or_log(call, body.prompt)
+        if body.background:
+            try:
+                return await run_in_threadpool(
+                    image_task_service.submit_generation,
+                    identity,
+                    client_task_id=body.client_task_id or new_uuid(),
+                    prompt=body.prompt,
+                    model=body.model,
+                    n=body.n,
+                    size=body.size,
+                    quality=body.quality,
+                    base_url=payload["base_url"],
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         return await call.run(openai_v1_image_generations.handle, payload)
+
+    @router.get("/v1/images/tasks")
+    async def list_image_generation_tasks(ids: str = "", authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        return await run_in_threadpool(image_task_service.list_tasks, identity, _parse_ids(ids))
+
+    @router.get("/v1/images/tasks/{task_id}")
+    async def get_image_generation_task(task_id: str, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        result = await run_in_threadpool(image_task_service.list_tasks, identity, [task_id])
+        items = result.get("items") if isinstance(result, dict) else []
+        if not items:
+            raise HTTPException(status_code=404, detail={"error": "task not found"})
+        return items[0]
 
     @router.post("/v1/images/edits")
     async def edit_images(

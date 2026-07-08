@@ -61,6 +61,7 @@ def create_router() -> APIRouter:
                 client_task_id=body.client_task_id,
                 prompt=body.prompt,
                 model=body.model,
+                n=1,
                 size=body.size,
                 quality=body.quality,
                 base_url=resolve_image_base_url(request),

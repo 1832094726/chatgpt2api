@@ -127,13 +127,14 @@ class ImageTaskService:
         prompt: str,
         model: str,
         size: str | None,
+        n: int = 1,
         quality: str = "auto",
         base_url: str = "",
     ) -> dict[str, Any]:
         payload = {
             "prompt": prompt,
             "model": model,
-            "n": 1,
+            "n": max(1, min(4, int(n or 1))),
             "size": size,
             "quality": quality,
             "response_format": "url",
