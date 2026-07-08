@@ -58,6 +58,7 @@
     "passphrase": "",
     "include": {
       "config": true,
+      "register": true,
       "cpa": true,
       "sub2api": true,
       "logs": true,

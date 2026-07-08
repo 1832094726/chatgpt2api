@@ -18,6 +18,7 @@ import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 const adminNavItems = [
   { href: "/image", label: "生图" },
   { href: "/accounts", label: "号池管理" },
+  { href: "/register", label: "注册机" },
   { href: "/hlool-mail", label: "HLOOL Mail" },
   { href: "/image-manager", label: "图片管理" },
   { href: "/logs", label: "日志管理" },
