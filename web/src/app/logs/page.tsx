@@ -213,6 +213,7 @@ function LogsContent() {
                   {isCallLog ? <TableHead>令牌名称</TableHead> : null}
                   {isCallLog ? <TableHead>调用耗时</TableHead> : null}
                   {isCallLog ? <TableHead>状态</TableHead> : null}
+                  {isCallLog ? <TableHead className="w-44">任务ID</TableHead> : null}
                   {isCallLog ? <TableHead className="w-36">图片</TableHead> : null}
                   <TableHead>简述</TableHead>
                   <TableHead className="w-40">操作</TableHead>
@@ -236,6 +237,11 @@ function LogsContent() {
                           <Badge variant={getStatusVariant(item)} className="rounded-md">
                             {getStatus(item)}
                           </Badge>
+                        </TableCell>
+                      ) : null}
+                      {isCallLog ? (
+                        <TableCell className="max-w-[180px] truncate font-mono text-xs text-stone-500" title={taskId || undefined}>
+                          {taskId || "-"}
                         </TableCell>
                       ) : null}
                       {isCallLog ? (
@@ -265,7 +271,6 @@ function LogsContent() {
                       ) : null}
                       <TableCell className="max-w-[420px] text-stone-500">
                         <div className="truncate">{item.summary || "-"}</div>
-                        {taskId ? <div className="mt-1 truncate text-xs text-stone-400">任务ID：{taskId}</div> : null}
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1">
