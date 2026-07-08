@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -42,7 +42,10 @@ def create_router() -> APIRouter:
     @router.post("/api/register/start")
     async def start_register(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"register": register_service.start()}
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "自动注册功能已禁用；请使用账号导入、OAuth 手动登录或 HLOOL Mail 工具箱。"},
+        )
 
     @router.post("/api/register/stop")
     async def stop_register(authorization: str | None = Header(default=None)):
