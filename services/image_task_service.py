@@ -196,6 +196,60 @@ class ImageTaskService:
                 missing_ids = []
             return {"items": items, "missing_ids": missing_ids}
 
+    def record_finished(
+        self,
+        identity: dict[str, object],
+        *,
+        task_id: str,
+        mode: str,
+        payload: dict[str, Any],
+        result: dict[str, Any] | None = None,
+        error: str = "",
+        started: float | None = None,
+    ) -> dict[str, Any]:
+        clean_task_id = _clean(task_id)
+        if not clean_task_id:
+            raise ValueError("task_id is required")
+        owner = _owner_id(identity)
+        key = _task_key(owner, clean_task_id)
+        started_ts = float(started or time.time())
+        now = _now_iso()
+        status = TASK_STATUS_ERROR if error else TASK_STATUS_SUCCESS
+        result = result if isinstance(result, dict) else {}
+        task = {
+            "id": clean_task_id,
+            "owner_id": owner,
+            "key_name": _clean(identity.get("name")),
+            "role": _clean(identity.get("role")),
+            "status": status,
+            "mode": "edit" if mode == "edit" else "generate",
+            "model": _clean(payload.get("model"), "gpt-image-2"),
+            "size": _clean(payload.get("size")),
+            "quality": _clean(payload.get("quality"), "auto"),
+            "request_text": request_text(payload.get("prompt")),
+            "created_at": datetime.fromtimestamp(started_ts).strftime("%Y-%m-%d %H:%M:%S"),
+            "updated_at": now,
+            "created_ts": started_ts,
+            "updated_ts": time.time(),
+            "started_ts": started_ts,
+            "duration_ms": int((time.time() - started_ts) * 1000),
+        }
+        data = result.get("data")
+        if isinstance(data, list):
+            task["data"] = data
+        usage = result.get("usage")
+        if isinstance(usage, dict):
+            task["usage"] = usage
+        conversation_id = _clean(result.get("_conversation_id") or result.get("conversation_id"))
+        if conversation_id:
+            task["conversation_id"] = conversation_id
+        if error:
+            task["error"] = error
+        with self._lock:
+            self._tasks[key] = task
+            self._save_locked()
+        return _public_task(task)
+
     def _submit(
         self,
         identity: dict[str, object],

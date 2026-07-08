@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
@@ -108,12 +110,13 @@ def create_router() -> APIRouter:
         payload["base_url"] = resolve_image_base_url(request)
         call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_text=body.prompt)
         await filter_or_log(call, body.prompt)
+        task_id = body.client_task_id or new_uuid()
         if body.background:
             try:
                 return await run_in_threadpool(
                     image_task_service.submit_generation,
                     identity,
-                    client_task_id=body.client_task_id or new_uuid(),
+                    client_task_id=task_id,
                     prompt=body.prompt,
                     model=body.model,
                     n=body.n,
@@ -123,7 +126,39 @@ def create_router() -> APIRouter:
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-        return await call.run(openai_v1_image_generations.handle, payload)
+
+        def handle_and_record_image_generation(sync_payload: dict):
+            started = time.time()
+            try:
+                result = openai_v1_image_generations.handle(sync_payload)
+                if isinstance(result, dict):
+                    response = dict(result)
+                    response["task_id"] = task_id
+                    image_task_service.record_finished(
+                        identity,
+                        task_id=task_id,
+                        mode="generate",
+                        payload=sync_payload,
+                        result=response,
+                        started=started,
+                    )
+                    return response
+                return result
+            except Exception as exc:
+                try:
+                    image_task_service.record_finished(
+                        identity,
+                        task_id=task_id,
+                        mode="generate",
+                        payload=sync_payload,
+                        error=str(exc) or "image generation failed",
+                        started=started,
+                    )
+                except Exception:
+                    pass
+                raise
+
+        return await call.run(handle_and_record_image_generation, payload)
 
     @router.get("/v1/images/tasks")
     async def list_image_generation_tasks(ids: str = "", authorization: str | None = Header(default=None)):

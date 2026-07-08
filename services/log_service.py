@@ -157,6 +157,20 @@ def _collect_conversation_ids(value: object) -> list[str]:
     return ids
 
 
+def _collect_task_ids(value: object) -> list[str]:
+    ids: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"task_id", "_task_id"} and isinstance(item, str) and item.strip():
+                ids.append(item.strip())
+            else:
+                ids.extend(_collect_task_ids(item))
+    elif isinstance(value, list):
+        for item in value:
+            ids.extend(_collect_task_ids(item))
+    return ids
+
+
 def _strip_internal_response_fields(value: object) -> object:
     if isinstance(value, dict):
         return {
@@ -331,6 +345,9 @@ class LoggedCall:
             conv_id = conv_ids[0] if conv_ids else ""
         if conv_id:
             detail["conversation_id"] = conv_id
+        task_ids = _collect_task_ids(result)
+        if task_ids:
+            detail["task_id"] = task_ids[0]
         collected_urls = [*(urls or []), *_collect_urls(result)]
         if collected_urls and not self.endpoint.startswith("/v1/search"):
             detail["urls"] = list(dict.fromkeys(collected_urls))
