@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import require_identity, resolve_image_base_url
-from services.content_filter import check_request
+from services.content_filter import check_request, request_text
 from services.image_task_service import image_task_service
 from services.log_service import LoggedCall
+from utils.helper import has_response_image_generation_tool
 
 
 class ImageGenerationTaskRequest(BaseModel):
@@ -17,6 +18,16 @@ class ImageGenerationTaskRequest(BaseModel):
     model: str = "gpt-image-2"
     size: str | None = None
     quality: str = "auto"
+
+
+class ResponseTaskRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    client_task_id: str = Field(..., min_length=1)
+    model: str | None = None
+    input: object | None = None
+    tools: list[dict[str, object]] | None = None
+    tool_choice: object | None = None
+    stream: bool | None = None
 
 
 class ResumePollRequest(BaseModel):
@@ -99,6 +110,57 @@ def create_router() -> APIRouter:
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.post("/api/image-tasks/responses")
+    async def create_response_task(
+        body: ResponseTaskRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        identity = require_identity(authorization)
+        payload = body.model_dump(mode="python", exclude={"client_task_id"})
+        if not has_response_image_generation_tool(payload):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "image_generation tool is required"},
+            )
+        preview = request_text(payload.get("input"), payload.get("instructions"))
+        model = str(payload.get("model") or "auto")
+        await filter_or_log(
+            LoggedCall(
+                identity,
+                "/api/image-tasks/responses",
+                model,
+                "Responses 生图任务",
+                request_text=preview,
+            ),
+            preview,
+        )
+        try:
+            return await run_in_threadpool(
+                image_task_service.submit_response,
+                identity,
+                client_task_id=body.client_task_id,
+                payload=payload,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.get("/api/image-tasks/{task_id}/events")
+    async def list_response_task_events(
+        task_id: str,
+        after: int = Query(default=0, ge=0),
+        authorization: str | None = Header(default=None),
+    ):
+        identity = require_identity(authorization)
+        try:
+            return await run_in_threadpool(
+                image_task_service.list_events,
+                identity,
+                task_id,
+                after,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail={"error": "task not found"}) from exc
 
     @router.post("/api/image-tasks/{task_id}/resume-poll")
     async def resume_image_poll(

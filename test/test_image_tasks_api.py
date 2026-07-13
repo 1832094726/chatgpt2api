@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import api.image_tasks as image_tasks_module
+import api.ai as ai_module
 
 
 AUTH_HEADERS = {"Authorization": "Bearer chatgpt2api"}
@@ -19,6 +20,7 @@ class FakeImageTaskService:
     def __init__(self):
         self.generation_calls = []
         self.edit_calls = []
+        self.response_calls = []
 
     def submit_generation(self, identity, **kwargs):
         self.generation_calls.append((identity, kwargs))
@@ -40,6 +42,23 @@ class FakeImageTaskService:
             "created_at": "2026-01-01 00:00:00",
             "updated_at": "2026-01-01 00:00:00",
         }
+
+    def submit_response(self, identity, **kwargs):
+        self.response_calls.append((identity, kwargs))
+        return {
+            "id": kwargs["client_task_id"],
+            "status": "queued",
+            "mode": "response",
+            "created_at": "2026-01-01 00:00:00",
+            "updated_at": "2026-01-01 00:00:00",
+        }
+
+    def list_events(self, _identity, task_id, after):
+        events = [
+            {"type": "response.created"},
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        return {"events": events[after:], "next_cursor": len(events), "status": "success"}
 
     def list_tasks(self, _identity, ids):
         return {
@@ -65,8 +84,12 @@ class ImageTasksApiTests(unittest.TestCase):
         self.service_patcher = mock.patch.object(image_tasks_module, "image_task_service", self.fake_service)
         self.service_patcher.start()
         self.addCleanup(self.service_patcher.stop)
+        self.ai_service_patcher = mock.patch.object(ai_module, "image_task_service", self.fake_service)
+        self.ai_service_patcher.start()
+        self.addCleanup(self.ai_service_patcher.stop)
         app = FastAPI()
         app.include_router(image_tasks_module.create_router())
+        app.include_router(ai_module.create_router())
         self.client = TestClient(app)
 
     def test_create_generation_task(self):
@@ -125,6 +148,69 @@ class ImageTasksApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual([item["id"] for item in payload["items"]], ["task-1"])
         self.assertEqual(payload["missing_ids"], ["missing"])
+
+    def test_create_response_task_requires_image_generation_tool(self):
+        response = self.client.post(
+            "/api/image-tasks/responses",
+            headers=AUTH_HEADERS,
+            json={
+                "client_task_id": "resp-task-1",
+                "model": "gpt-5.4",
+                "input": "draw a cat",
+                "tools": [{"type": "web_search"}],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.fake_service.response_calls, [])
+
+    def test_create_response_task_and_query_events(self):
+        response = self.client.post(
+            "/api/image-tasks/responses",
+            headers=AUTH_HEADERS,
+            json={
+                "client_task_id": "resp-task-1",
+                "model": "gpt-5.4",
+                "input": "draw a cat",
+                "stream": True,
+                "tools": [{"type": "image_generation", "size": "1024x1024"}],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["id"], "resp-task-1")
+        self.assertEqual(len(self.fake_service.response_calls), 1)
+        submitted = self.fake_service.response_calls[0][1]
+        self.assertNotIn("client_task_id", submitted["payload"])
+        self.assertEqual(submitted["payload"]["tools"][0]["type"], "image_generation")
+
+        events_response = self.client.get(
+            "/api/image-tasks/resp-task-1/events?after=1",
+            headers=AUTH_HEADERS,
+        )
+        self.assertEqual(events_response.status_code, 200, events_response.text)
+        self.assertEqual(
+            [event["type"] for event in events_response.json()["events"]],
+            ["response.completed"],
+        )
+        self.assertEqual(events_response.json()["next_cursor"], 2)
+
+    def test_v1_response_background_uses_stable_task_id(self):
+        response = self.client.post(
+            "/v1/responses",
+            headers=AUTH_HEADERS,
+            json={
+                "client_task_id": "v1-resp-task-1",
+                "background": True,
+                "model": "gpt-5.4",
+                "input": "draw a cat",
+                "tools": [{"type": "image_generation"}],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["id"], "v1-resp-task-1")
+        self.assertEqual(self.fake_service.response_calls[-1][1]["client_task_id"], "v1-resp-task-1")
 
 
 if __name__ == "__main__":

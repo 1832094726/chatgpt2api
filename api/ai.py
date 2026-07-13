@@ -22,7 +22,7 @@ from services.protocol import (
     openai_v1_response,
     openai_search,
 )
-from utils.helper import new_uuid
+from utils.helper import has_response_image_generation_tool, new_uuid
 
 
 class ImageGenerationRequest(BaseModel):
@@ -56,6 +56,8 @@ class ResponseCreateRequest(BaseModel):
     tools: list[dict[str, object]] | None = None
     tool_choice: object | None = None
     stream: bool | None = None
+    background: bool = False
+    client_task_id: str | None = None
 
 
 class AnthropicMessageRequest(BaseModel):
@@ -223,6 +225,27 @@ def create_router() -> APIRouter:
             request_shape=request_shape(payload.get("input")),
         )
         await filter_or_log(call, request_preview)
+        if body.background:
+            if not has_response_image_generation_tool(payload):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"error": "background responses require image_generation tool"},
+                )
+            task_id = body.client_task_id or new_uuid()
+            task_payload = dict(payload)
+            task_payload.pop("background", None)
+            task_payload.pop("client_task_id", None)
+            try:
+                return await run_in_threadpool(
+                    image_task_service.submit_response,
+                    identity,
+                    client_task_id=task_id,
+                    payload=task_payload,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        payload.pop("background", None)
+        payload.pop("client_task_id", None)
         return await call.run(openai_v1_response.handle, payload)
 
     @router.post("/v1/messages")

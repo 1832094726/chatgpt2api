@@ -11,7 +11,7 @@ from typing import Any
 from services.config import DATA_DIR, config
 from services.content_filter import request_text
 from services.log_service import LOG_TYPE_CALL, log_service
-from services.protocol import openai_v1_image_edit, openai_v1_image_generations
+from services.protocol import openai_v1_image_edit, openai_v1_image_generations, openai_v1_response
 
 TASK_STATUS_QUEUED = "queued"
 TASK_STATUS_RUNNING = "running"
@@ -80,6 +80,8 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         item["conversation_id"] = task.get("conversation_id")
     if task.get("data") is not None:
         item["data"] = task.get("data")
+    if task.get("response") is not None:
+        item["response"] = task.get("response")
     if task.get("usage") is not None:
         item["usage"] = task.get("usage")
     if task.get("error"):
@@ -107,11 +109,13 @@ class ImageTaskService:
         *,
         generation_handler: Callable[[dict[str, Any]], dict[str, Any]] = openai_v1_image_generations.handle,
         edit_handler: Callable[[dict[str, Any]], dict[str, Any]] = openai_v1_image_edit.handle,
+        response_handler: Callable[[dict[str, Any]], Any] = openai_v1_response.handle,
         retention_days_getter: Callable[[], int] | None = None,
     ):
         self.path = path
         self.generation_handler = generation_handler
         self.edit_handler = edit_handler
+        self.response_handler = response_handler
         self.retention_days_getter = retention_days_getter or (lambda: config.image_retention_days)
         self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
@@ -172,6 +176,15 @@ class ImageTaskService:
         }
         return self._submit(identity, client_task_id=client_task_id, mode="edit", payload=payload)
 
+    def submit_response(
+        self,
+        identity: dict[str, object],
+        *,
+        client_task_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._submit(identity, client_task_id=client_task_id, mode="response", payload=dict(payload))
+
     def list_tasks(self, identity: dict[str, object], task_ids: list[str]) -> dict[str, Any]:
         owner = _owner_id(identity)
         requested_ids = [_clean(task_id) for task_id in task_ids if _clean(task_id)]
@@ -195,6 +208,28 @@ class ImageTaskService:
                 items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
                 missing_ids = []
             return {"items": items, "missing_ids": missing_ids}
+
+    def list_events(
+        self,
+        identity: dict[str, object],
+        task_id: str,
+        after: int = 0,
+    ) -> dict[str, Any]:
+        owner = _owner_id(identity)
+        clean_task_id = _clean(task_id)
+        cursor = max(0, int(after or 0))
+        with self._lock:
+            task = self._tasks.get(_task_key(owner, clean_task_id))
+            if task is None:
+                raise ValueError("task not found")
+            events = task.get("events")
+            if not isinstance(events, list):
+                events = []
+            return {
+                "events": events[cursor:],
+                "next_cursor": len(events),
+                "status": task.get("status"),
+            }
 
     def record_finished(
         self,
@@ -329,8 +364,43 @@ class ImageTaskService:
         # 将进度回调添加到 payload 中（handler 会提取并传递给 ConversationRequest）
         payload_with_progress = {**payload, "progress_callback": progress_callback}
         try:
-            handler = self.edit_handler if mode == "edit" else self.generation_handler
+            if mode == "response":
+                handler = self.response_handler
+            elif mode == "edit":
+                handler = self.edit_handler
+            else:
+                handler = self.generation_handler
             result = handler(payload_with_progress)
+            if mode == "response":
+                if not isinstance(result, dict):
+                    final_response = None
+                    for event in result:
+                        if not isinstance(event, dict):
+                            continue
+                        self._append_event(key, event)
+                        if event.get("type") == "response.completed" and isinstance(event.get("response"), dict):
+                            final_response = event["response"]
+                    if final_response is None:
+                        raise RuntimeError("response stream ended without response.completed")
+                    result = final_response
+                duration_ms = int((time.time() - started) * 1000)
+                self._update_task(
+                    key,
+                    status=TASK_STATUS_SUCCESS,
+                    response=result,
+                    error="",
+                    duration_ms=duration_ms,
+                )
+                self._log_call(
+                    identity,
+                    mode,
+                    model,
+                    started,
+                    "调用完成",
+                    task_id=task_id,
+                    request_preview=request_text(payload.get("input")),
+                )
+                return
             if not isinstance(result, dict):
                 raise RuntimeError("image task returned streaming result unexpectedly")
             data = result.get("data")
@@ -433,6 +503,17 @@ class ImageTaskService:
             task["updated_ts"] = time.time()
             self._save_locked()
 
+    def _append_event(self, key: str, event: dict[str, Any]) -> None:
+        with self._lock:
+            task = self._tasks.get(key)
+            if task is None:
+                return
+            events = task.setdefault("events", [])
+            events.append(event)
+            task["updated_at"] = _now_iso()
+            task["updated_ts"] = time.time()
+            self._save_locked()
+
     def _load_locked(self) -> dict[str, dict[str, Any]]:
         if not self.path.exists():
             return {}
@@ -460,7 +541,7 @@ class ImageTaskService:
                 "key_name": _clean(item.get("key_name")),
                 "role": _clean(item.get("role")),
                 "status": status,
-                "mode": "edit" if item.get("mode") == "edit" else "generate",
+                "mode": item.get("mode") if item.get("mode") in {"generate", "edit", "response"} else "generate",
                 "model": _clean(item.get("model"), "gpt-image-2"),
                 "size": _clean(item.get("size")),
                 "quality": _clean(item.get("quality"), "auto"),
@@ -478,6 +559,12 @@ class ImageTaskService:
             usage = item.get("usage")
             if isinstance(usage, dict):
                 task["usage"] = usage
+            response = item.get("response")
+            if isinstance(response, dict):
+                task["response"] = response
+            events = item.get("events")
+            if isinstance(events, list):
+                task["events"] = [event for event in events if isinstance(event, dict)]
             error = _clean(item.get("error"))
             if error:
                 task["error"] = error

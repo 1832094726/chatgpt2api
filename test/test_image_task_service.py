@@ -26,13 +26,79 @@ def wait_for_task(service: ImageTaskService, identity: dict[str, object], task_i
 
 
 class ImageTaskServiceTests(unittest.TestCase):
-    def make_service(self, path: Path, handler=None) -> ImageTaskService:
+    def make_service(self, path: Path, handler=None, response_handler=None) -> ImageTaskService:
         return ImageTaskService(
             path,
             generation_handler=handler or (lambda _payload: {"data": [{"url": "http://example.test/image.png"}]}),
             edit_handler=handler or (lambda _payload: {"data": [{"url": "http://example.test/edit.png"}]}),
+            response_handler=response_handler or (lambda _payload: {"id": "resp_default", "status": "completed", "output": []}),
             retention_days_getter=lambda: 30,
         )
+
+    def test_duplicate_response_submit_uses_existing_task(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            calls = 0
+
+            def response_handler(_payload):
+                nonlocal calls
+                calls += 1
+                return {
+                    "id": "resp_1",
+                    "status": "completed",
+                    "output": [{"type": "image_generation_call", "result": "final"}],
+                }
+
+            service = self.make_service(
+                Path(tmp_dir) / "image_tasks.json",
+                response_handler=response_handler,
+            )
+            first = service.submit_response(
+                OWNER,
+                client_task_id="resp-task-1",
+                payload={"model": "gpt-5.4", "input": "draw"},
+            )
+            second = service.submit_response(
+                OWNER,
+                client_task_id="resp-task-1",
+                payload={"model": "gpt-5.4", "input": "draw"},
+            )
+
+            self.assertEqual(first["id"], second["id"])
+            task = wait_for_task(service, OWNER, "resp-task-1", "success")
+            self.assertEqual(task["response"]["id"], "resp_1")
+            self.assertEqual(calls, 1)
+
+    def test_stream_response_events_are_queryable_by_cursor(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(
+                Path(tmp_dir) / "image_tasks.json",
+                response_handler=lambda _payload: iter(
+                    [
+                        {"type": "response.created"},
+                        {
+                            "type": "response.completed",
+                            "response": {"id": "resp_stream_1", "status": "completed"},
+                        },
+                    ]
+                ),
+            )
+            service.submit_response(
+                OWNER,
+                client_task_id="resp-stream-1",
+                payload={"model": "gpt-5.4", "input": "draw", "stream": True},
+            )
+
+            wait_for_task(service, OWNER, "resp-stream-1", "success")
+            first_page = service.list_events(OWNER, "resp-stream-1", after=0)
+            second_page = service.list_events(OWNER, "resp-stream-1", after=1)
+
+            self.assertEqual(
+                [event["type"] for event in first_page["events"]],
+                ["response.created", "response.completed"],
+            )
+            self.assertEqual(first_page["next_cursor"], 2)
+            self.assertEqual([event["type"] for event in second_page["events"]], ["response.completed"])
+            self.assertEqual(second_page["next_cursor"], 2)
 
     def test_duplicate_submit_uses_existing_task(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
