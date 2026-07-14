@@ -124,6 +124,7 @@ def create_router() -> APIRouter:
                     n=body.n,
                     size=body.size,
                     quality=body.quality,
+                    response_format=body.response_format,
                     base_url=payload["base_url"],
                 )
             except ValueError as exc:

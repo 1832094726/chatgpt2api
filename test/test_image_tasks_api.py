@@ -104,6 +104,7 @@ class ImageTasksApiTests(unittest.TestCase):
         self.assertEqual(payload["id"], "task-1")
         self.assertEqual(payload["status"], "success")
         self.assertEqual(len(self.fake_service.generation_calls), 1)
+        self.assertEqual(self.fake_service.generation_calls[0][1]["response_format"], "b64_json")
 
     def test_create_edit_task_accepts_multiple_images(self):
         """测试图片编辑任务接口支持多个上传图片。"""
@@ -122,6 +123,7 @@ class ImageTasksApiTests(unittest.TestCase):
         self.assertEqual(len(self.fake_service.edit_calls), 1)
         images = self.fake_service.edit_calls[0][1]["images"]
         self.assertEqual(len(images), 2)
+        self.assertEqual(self.fake_service.edit_calls[0][1]["response_format"], "b64_json")
 
     def test_create_edit_task_accepts_image_url(self):
         """测试图片编辑任务接口支持表单 image_url 引用。"""

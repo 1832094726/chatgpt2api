@@ -137,6 +137,7 @@ class ImageTaskService:
         size: str | None,
         n: int = 1,
         quality: str = "auto",
+        response_format: str = "url",
         base_url: str = "",
     ) -> dict[str, Any]:
         payload = {
@@ -145,7 +146,7 @@ class ImageTaskService:
             "n": max(1, min(4, int(n or 1))),
             "size": size,
             "quality": quality,
-            "response_format": "url",
+            "response_format": _clean(response_format, "url"),
             "base_url": base_url,
         }
         return self._submit(identity, client_task_id=client_task_id, mode="generate", payload=payload)
@@ -159,6 +160,7 @@ class ImageTaskService:
         model: str,
         size: str | None,
         quality: str = "auto",
+        response_format: str = "url",
         base_url: str = "",
         images: list[tuple[bytes, str, str]] | None = None,
         masks: list[tuple[bytes, str, str]] | None = None,
@@ -171,7 +173,7 @@ class ImageTaskService:
             "n": 1,
             "size": size,
             "quality": quality,
-            "response_format": "url",
+            "response_format": _clean(response_format, "url"),
             "base_url": base_url,
         }
         return self._submit(identity, client_task_id=client_task_id, mode="edit", payload=payload)

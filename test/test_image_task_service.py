@@ -134,6 +134,31 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertEqual(task["data"][0]["url"], "http://example.test/image.png")
             self.assertEqual(calls, 1)
 
+    def test_generation_preserves_requested_response_format(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            received_payload = {}
+
+            def generation_handler(payload):
+                received_payload.update(payload)
+                return {"data": [{"b64_json": "encoded-image"}]}
+
+            service = self.make_service(
+                Path(tmp_dir) / "image_tasks.json",
+                handler=generation_handler,
+            )
+            service.submit_generation(
+                OWNER,
+                client_task_id="format-task-1",
+                prompt="draw",
+                model="gpt-image-2",
+                size="1024x1024",
+                response_format="b64_json",
+            )
+
+            task = wait_for_task(service, OWNER, "format-task-1", "success")
+            self.assertEqual(received_payload["response_format"], "b64_json")
+            self.assertEqual(task["data"][0]["b64_json"], "encoded-image")
+
     def test_different_owner_cannot_query_task(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = self.make_service(Path(tmp_dir) / "image_tasks.json")

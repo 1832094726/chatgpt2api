@@ -18,6 +18,7 @@ class ImageGenerationTaskRequest(BaseModel):
     model: str = "gpt-image-2"
     size: str | None = None
     quality: str = "auto"
+    response_format: str = "b64_json"
 
 
 class ResponseTaskRequest(BaseModel):
@@ -75,6 +76,7 @@ def create_router() -> APIRouter:
                 n=1,
                 size=body.size,
                 quality=body.quality,
+                response_format=body.response_format,
                 base_url=resolve_image_base_url(request),
             )
         except ValueError as exc:
@@ -104,6 +106,7 @@ def create_router() -> APIRouter:
                 model=model,
                 size=payload["size"],
                 quality=payload["quality"],
+                response_format=payload["response_format"],
                 base_url=resolve_image_base_url(request),
                 images=images,
                 masks=masks,
