@@ -9,9 +9,8 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from services.account_service import account_service
 from services.openai_backend_api import OpenAIBackendAPI
-from services.protocol.conversation import count_message_tokens, count_text_tokens, normalize_messages
+from services.protocol.conversation import count_message_tokens, count_text_tokens, normalize_messages, text_backend
 from services.protocol.openai_v1_chat_complete import collect_chat_content, stream_text_chat_completion
 
 XML_TOOL_RULE = """Tool output adapter: when calling tools, output ONLY this XML and no prose/markdown:
@@ -111,7 +110,7 @@ def message_request(body: dict[str, Any]) -> MessageRequest:
     payload = preprocess_payload(dict(body))
     model = str(payload.get("model") or "auto").strip() or "auto"
     return MessageRequest(
-        backend=OpenAIBackendAPI(access_token=account_service.get_text_access_token(model=model)),
+        backend=text_backend(model),
         messages=normalize_messages(payload.get("messages"), payload.get("system")),
         model=model,
         tools=payload.get("tools"),

@@ -5,6 +5,7 @@ import json
 import re
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator
@@ -706,8 +707,31 @@ def conversation_events(
     yield from iter_conversation_payloads(payloads, history_text, history_messages)
 
 
+_TEXT_BACKEND_POOL_MAX = 64
+_text_backend_pool_lock = threading.RLock()
+_text_backend_pool: OrderedDict[str, OpenAIBackendAPI] = OrderedDict()
+
+
+def _pooled_text_backend(access_token: str) -> OpenAIBackendAPI:
+    """按账号复用上游 Session，让连续文本请求复用 TLS/HTTP 连接。"""
+    with _text_backend_pool_lock:
+        backend = _text_backend_pool.pop(access_token, None)
+        if backend is None or getattr(backend, "_closed", False):
+            backend = OpenAIBackendAPI(access_token=access_token)
+        _text_backend_pool[access_token] = backend
+        while len(_text_backend_pool) > _TEXT_BACKEND_POOL_MAX:
+            # 只移除池引用；正在执行的请求仍持有实例，结束后由 GC 安全关闭。
+            _text_backend_pool.popitem(last=False)
+        return backend
+
+
+def _invalidate_text_backend(access_token: str) -> None:
+    with _text_backend_pool_lock:
+        _text_backend_pool.pop(access_token, None)
+
+
 def text_backend(model: str = "auto") -> OpenAIBackendAPI:
-    return OpenAIBackendAPI(access_token=account_service.get_text_access_token(model=model))
+    return _pooled_text_backend(account_service.get_text_access_token(model=model))
 
 
 def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) -> Iterator[str]:
@@ -719,9 +743,8 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
             raise RuntimeError("no available text account")
         if token:
             attempted_tokens.add(token)
-        active_backend = None
+        active_backend = backend if getattr(backend, "access_token", "") == token else _pooled_text_backend(token)
         try:
-            active_backend = OpenAIBackendAPI(access_token=token)
             for event in conversation_events(
                 active_backend,
                 messages=request.messages,
@@ -740,6 +763,7 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
         except Exception as exc:
             error_message = str(exc)
             if token and not emitted and is_token_invalid_error(error_message):
+                stale_token = token
                 refreshed_token = account_service.refresh_access_token(token, force=True, event="text_stream")
                 if refreshed_token and refreshed_token != token and refreshed_token not in attempted_tokens:
                     token = refreshed_token
@@ -749,12 +773,11 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
                         excluded_tokens=set(attempted_tokens),
                         model=request.model,
                     )
+                _invalidate_text_backend(stale_token)
                 if token:
+                    active_backend = _pooled_text_backend(token)
                     continue
             raise
-        finally:
-            if active_backend is not None:
-                active_backend.close()
 
 
 def collect_text(backend: OpenAIBackendAPI, request: ConversationRequest) -> str:

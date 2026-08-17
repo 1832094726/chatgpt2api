@@ -68,6 +68,8 @@ class ChatRequirements:
 DEFAULT_CLIENT_VERSION = "prod-a194cd50d4416d3c0b47c740f206b12ce60f5887"
 DEFAULT_CLIENT_BUILD_NUMBER = "6708908"
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
+BOOTSTRAP_TTL_SECS = 15 * 60
+PREFETCHED_REQUIREMENTS_TTL_SECS = 40
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
 CODEX_RESPONSES_MODEL = "gpt-5.5"
 SEARCH_MODEL = "gpt-5-5"
@@ -180,6 +182,12 @@ class OpenAIBackendAPI:
         self.session_id = self.fp["oai-session-id"]
         self.pow_script_sources: list[str] = []
         self.pow_data_build = ""
+        self._bootstrap_lock = threading.Lock()
+        self._bootstrap_at = 0.0
+        self._requirements_cache_lock = threading.Lock()
+        self._prefetched_requirements: ChatRequirements | None = None
+        self._prefetched_requirements_at = 0.0
+        self._requirements_prefetching = False
         self.progress_callback: Callable[[str], None] | None = None
         self.session = requests.Session(**proxy_settings.build_session_kwargs(
             account=self.account,
@@ -2582,6 +2590,7 @@ class OpenAIBackendAPI:
             stream=True,
         )
         ensure_ok(response, path)
+        self._prefetch_chat_requirements_async()
         try:
             yield from iter_sse_payloads(response)
         finally:
@@ -2649,20 +2658,69 @@ class OpenAIBackendAPI:
             except Exception:
                 pass
 
-    def _bootstrap(self) -> None:
-        """预热首页，并提取 PoW 相关脚本引用。"""
-        response = self.session.get(
-            self.base_url + "/",
-            headers=self._bootstrap_headers(),
-            timeout=30,
-        )
-        ensure_ok(response, "bootstrap")
-        self.pow_script_sources, self.pow_data_build = parse_pow_resources(response.text)
-        if not self.pow_script_sources:
-            self.pow_script_sources = [DEFAULT_POW_SCRIPT]
+    def _bootstrap(self, force: bool = False) -> None:
+        """预热首页，并在同一后端实例内短期复用 PoW 元数据与连接。"""
+        now = time.monotonic()
+        if not force and self.pow_script_sources and now - self._bootstrap_at < BOOTSTRAP_TTL_SECS:
+            return
+        with self._bootstrap_lock:
+            now = time.monotonic()
+            if not force and self.pow_script_sources and now - self._bootstrap_at < BOOTSTRAP_TTL_SECS:
+                return
+            response = self.session.get(
+                self.base_url + "/",
+                headers=self._bootstrap_headers(),
+                timeout=30,
+            )
+            ensure_ok(response, "bootstrap")
+            self.pow_script_sources, self.pow_data_build = parse_pow_resources(response.text)
+            if not self.pow_script_sources:
+                self.pow_script_sources = [DEFAULT_POW_SCRIPT]
+            self._bootstrap_at = time.monotonic()
 
     def _get_chat_requirements(self) -> ChatRequirements:
-        """获取当前模式对话所需的 sentinel token（prepare + finalize 两步流程）。"""
+        """优先消费预取的一次性 requirements token，否则同步获取。"""
+        now = time.monotonic()
+        with self._requirements_cache_lock:
+            cached = self._prefetched_requirements
+            cached_at = self._prefetched_requirements_at
+            self._prefetched_requirements = None
+            self._prefetched_requirements_at = 0.0
+        if cached is not None and now - cached_at <= PREFETCHED_REQUIREMENTS_TTL_SECS:
+            return cached
+        return self._fetch_chat_requirements()
+
+    def _prefetch_chat_requirements_async(self) -> None:
+        """当前轮被上游接受后，在后台准备下一枚一次性 requirements token。"""
+        now = time.monotonic()
+        with self._requirements_cache_lock:
+            if (
+                    self._prefetched_requirements is not None
+                    and now - self._prefetched_requirements_at <= PREFETCHED_REQUIREMENTS_TTL_SECS
+            ) or self._requirements_prefetching:
+                return
+            self._requirements_prefetching = True
+
+        def prefetch() -> None:
+            requirements = None
+            try:
+                requirements = self._fetch_chat_requirements()
+            except Exception as exc:
+                logger.debug({
+                    "event": "chat_requirements_prefetch_error",
+                    "error": repr(exc),
+                })
+            finally:
+                with self._requirements_cache_lock:
+                    if requirements is not None:
+                        self._prefetched_requirements = requirements
+                        self._prefetched_requirements_at = time.monotonic()
+                    self._requirements_prefetching = False
+
+        threading.Thread(target=prefetch, name="chat-requirements-prefetch", daemon=True).start()
+
+    def _fetch_chat_requirements(self) -> ChatRequirements:
+        """从上游获取一次性的 sentinel token（prepare + finalize 两步流程）。"""
         base = "/backend-api/sentinel/chat-requirements" if self.access_token else "/backend-anon/sentinel/chat-requirements"
         p_token = build_legacy_requirements_token(self.user_agent, self.pow_script_sources, self.pow_data_build)
 
