@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import time
 import uuid
+import threading
+from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Any, Iterable, Iterator
 
 from fastapi import HTTPException
 
-from services.protocol.chat_completion_cache import cache_key, chat_completion_cache, normalize_text_messages
+from services.protocol.chat_completion_cache import normalize_text_messages
 from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
@@ -18,6 +21,7 @@ from services.protocol.conversation import (
     stream_image_outputs_with_pool,
     stream_text_deltas,
     text_backend,
+    text_backend_for_access_token,
 )
 from services.protocol.web_search_tool import (
     WEB_SEARCH_TOOL_TYPES,
@@ -35,6 +39,7 @@ from utils.image_tokens import (
     image_usage,
     token_usage,
 )
+from utils.log import logger
 
 TOOL_UNAVAILABLE_SYSTEM_MESSAGE = (
     "This compatibility backend cannot execute local tools, shell commands, non-search tools, "
@@ -43,6 +48,74 @@ TOOL_UNAVAILABLE_SYSTEM_MESSAGE = (
 )
 
 RESPONSE_CONTENT_PART_TYPES = {"text", "input_text", "output_text", "image_url", "input_image", "image"}
+
+
+@dataclass
+class ResponseContinuation:
+    response_id: str
+    conversation_id: str
+    parent_message_id: str
+    access_token: str
+    model: str
+    claimed: bool = False
+
+
+_RESPONSE_CONTINUATION_MAX = 1024
+_response_continuation_lock = threading.RLock()
+_response_continuations: OrderedDict[str, ResponseContinuation] = OrderedDict()
+
+
+def _previous_response_id(body: dict[str, Any]) -> str:
+    value = body.get("previous_response_id")
+    if value is None:
+        return ""
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=400, detail={"error": "previous_response_id must be a non-empty string"})
+    return value.strip()
+
+
+def _acquire_response_continuation(response_id: str, model: str) -> ResponseContinuation:
+    with _response_continuation_lock:
+        state = _response_continuations.get(response_id)
+        if state is None:
+            raise HTTPException(status_code=400, detail={"error": "previous_response_id is unknown or no longer available"})
+        if state.claimed:
+            raise HTTPException(status_code=409, detail={"error": "previous_response_id is already in use"})
+        if model != state.model:
+            raise HTTPException(status_code=400, detail={"error": "continued responses must use the same model"})
+        state.claimed = True
+        _response_continuations.move_to_end(response_id)
+        return state
+
+
+def _release_response_continuation(response_id: str) -> None:
+    if not response_id:
+        return
+    with _response_continuation_lock:
+        state = _response_continuations.get(response_id)
+        if state is not None:
+            state.claimed = False
+
+
+def _commit_response_continuation(previous_response_id: str, state: ResponseContinuation) -> None:
+    with _response_continuation_lock:
+        if previous_response_id:
+            _response_continuations.pop(previous_response_id, None)
+        _response_continuations[state.response_id] = state
+        while len(_response_continuations) > _RESPONSE_CONTINUATION_MAX:
+            removable = next(
+                (key for key, value in _response_continuations.items() if not value.claimed),
+                None,
+            )
+            if removable is None:
+                break
+            _response_continuations.pop(removable, None)
+
+
+def _clear_response_continuations() -> None:
+    """Test helper; production state is bounded and intentionally has no idle timeout."""
+    with _response_continuation_lock:
+        _response_continuations.clear()
 
 
 def normalize_thinking_effort(value: object) -> str:
@@ -300,25 +373,60 @@ def stream_text_response(backend, body: dict[str, Any], messages: list[dict[str,
     model = str(body.get("model") or "auto").strip() or "auto"
     messages = messages if messages is not None else messages_from_input(body.get("input"), body.get("instructions"))
     thinking_effort = thinking_effort_from_body(body)
+    previous_response_id = _previous_response_id(body)
+    previous_state = _acquire_response_continuation(previous_response_id, model) if previous_response_id else None
+    active_backend = (
+        text_backend_for_access_token(previous_state.access_token)
+        if previous_state is not None
+        else (backend or text_backend(model))
+    )
     response_id = f"resp_{uuid.uuid4().hex}"
     item_id = f"msg_{uuid.uuid4().hex}"
     created = int(time.time())
     full_text = ""
-    yield response_created(response_id, model, created)
-    yield {"type": "response.output_item.added", "output_index": 0, "item": text_output_item("", item_id, "in_progress")}
-    request = ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)
-    for delta in stream_text_deltas(backend, request):
-        full_text += delta
-        yield {"type": "response.output_text.delta", "item_id": item_id, "output_index": 0, "content_index": 0, "delta": delta}
-    yield {"type": "response.output_text.done", "item_id": item_id, "output_index": 0, "content_index": 0, "text": full_text}
-    item = text_output_item(full_text, item_id, "completed")
-    yield {"type": "response.output_item.done", "output_index": 0, "item": item}
-    usage = token_usage(
-        input_text_tokens=count_message_text_tokens(messages, model),
-        input_image_tokens=count_message_image_tokens(messages, model),
-        output_text_tokens=count_text_tokens(full_text, model),
-    )
-    yield response_completed(response_id, model, created, [item], usage)
+    committed = False
+    try:
+        yield response_created(response_id, model, created)
+        yield {"type": "response.output_item.added", "output_index": 0, "item": text_output_item("", item_id, "in_progress")}
+        request = ConversationRequest(
+            model=model,
+            messages=messages,
+            thinking_effort=thinking_effort,
+            conversation_id=previous_state.conversation_id if previous_state else "",
+            parent_message_id=previous_state.parent_message_id if previous_state else "",
+        )
+        for delta in stream_text_deltas(active_backend, request):
+            full_text += delta
+            yield {"type": "response.output_text.delta", "item_id": item_id, "output_index": 0, "content_index": 0, "delta": delta}
+        if not request.response_conversation_id or not request.response_parent_message_id:
+            raise RuntimeError("upstream response did not provide a continuation cursor")
+        yield {"type": "response.output_text.done", "item_id": item_id, "output_index": 0, "content_index": 0, "text": full_text}
+        item = text_output_item(full_text, item_id, "completed")
+        yield {"type": "response.output_item.done", "output_index": 0, "item": item}
+        usage = token_usage(
+            input_text_tokens=count_message_text_tokens(messages, model),
+            input_image_tokens=count_message_image_tokens(messages, model),
+            output_text_tokens=count_text_tokens(full_text, model),
+        )
+        _commit_response_continuation(previous_response_id, ResponseContinuation(
+            response_id=response_id,
+            conversation_id=request.response_conversation_id,
+            parent_message_id=request.response_parent_message_id,
+            access_token=str(getattr(active_backend, "access_token", "") or ""),
+            model=model,
+        ))
+        committed = True
+        logger.info({
+            "event": "response_continuation_saved",
+            "response_id": response_id,
+            "previous_response_id": previous_response_id,
+            "conversation_id": request.response_conversation_id,
+            "parent_message_id": request.response_parent_message_id,
+        })
+        yield response_completed(response_id, model, created, [item], usage)
+    finally:
+        if previous_response_id and not committed:
+            _release_response_continuation(previous_response_id)
 
 
 def stream_web_search_response(body: dict[str, Any], messages: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
@@ -411,17 +519,21 @@ def collect_response(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
 
 def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    previous_response_id = _previous_response_id(body)
     if is_text_response_request(body):
         model, messages = text_response_parts(body)
         if has_web_search_tool(body) and not has_unsupported_response_tools(body):
+            if previous_response_id:
+                raise HTTPException(status_code=400, detail={"error": "previous_response_id is only supported for plain text responses"})
             yield from stream_web_search_response(body, messages)
             return
-        key = cache_key(body, messages, stream=bool(body.get("stream")))
-        yield from chat_completion_cache.get_or_compute_stream(
-            key,
-            lambda: stream_text_response(text_backend(model), body, messages),
-        )
+        # A Responses response ID represents a unique upstream conversation cursor.
+        # Do not replay/coalesce it through the chat-completion cache across clients.
+        yield from stream_text_response(None, body, messages)
         return
+
+    if previous_response_id:
+        raise HTTPException(status_code=400, detail={"error": "previous_response_id is only supported for plain text responses"})
 
     prompt = extract_response_prompt(body.get("input"))
     if not prompt:

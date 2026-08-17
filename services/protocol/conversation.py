@@ -308,6 +308,10 @@ class ConversationRequest:
     base_url: str | None = None
     message_as_error: bool = False
     progress_callback: Any = None  # Callable[[str], None] | None
+    conversation_id: str = ""
+    parent_message_id: str = ""
+    response_conversation_id: str = ""
+    response_parent_message_id: str = ""
 
 
 @dataclass
@@ -315,6 +319,7 @@ class ConversationState:
     text: str = ""
     raw_text: str = ""
     conversation_id: str = ""
+    last_assistant_message_id: str = ""
     file_ids: list[str] = field(default_factory=list)
     sediment_ids: list[str] = field(default_factory=list)
     blocked: bool = False
@@ -617,6 +622,15 @@ def update_conversation_state(state: ConversationState, payload: str, event: dic
     value = event.get("v")
     if isinstance(value, dict):
         state.conversation_id = str(value.get("conversation_id") or state.conversation_id)
+    for candidate in (event, value):
+        if not isinstance(candidate, dict):
+            continue
+        message = candidate.get("message")
+        if not isinstance(message, dict) or not is_visible_assistant_message(message):
+            continue
+        message_id = str(message.get("id") or "").strip()
+        if message_id:
+            state.last_assistant_message_id = message_id
     if event.get("type") == "moderation":
         moderation = event.get("moderation_response")
         if isinstance(moderation, dict) and moderation.get("blocked") is True:
@@ -634,6 +648,7 @@ def conversation_base_event(event_type: str, state: ConversationState, **extra: 
         "type": event_type,
         "text": state.text,
         "conversation_id": state.conversation_id,
+        "last_assistant_message_id": state.last_assistant_message_id,
         "file_ids": list(state.file_ids),
         "sediment_ids": list(state.sediment_ids),
         "blocked": state.blocked,
@@ -690,6 +705,8 @@ def conversation_events(
     size: str | None = None,
     quality: str = "auto",
     thinking_effort: str = "",
+    conversation_id: str = "",
+    parent_message_id: str = "",
 ) -> Iterator[dict[str, Any]]:
     normalized = normalize_messages(messages or ([{"role": "user", "content": prompt}] if prompt else []))
     image_model = is_supported_image_model(model)
@@ -703,6 +720,8 @@ def conversation_events(
         images=images if image_model else None,
         system_hints=["picture_v2"] if image_model else None,
         thinking_effort=thinking_effort if not image_model else "",
+        conversation_id=conversation_id if not image_model else "",
+        parent_message_id=parent_message_id if not image_model else "",
     )
     yield from iter_conversation_payloads(payloads, history_text, history_messages)
 
@@ -734,6 +753,13 @@ def text_backend(model: str = "auto") -> OpenAIBackendAPI:
     return _pooled_text_backend(account_service.get_text_access_token(model=model))
 
 
+def text_backend_for_access_token(access_token: str) -> OpenAIBackendAPI:
+    """Return the pooled backend for the account that owns a continued conversation."""
+    if not access_token:
+        raise RuntimeError("continuation account is unavailable")
+    return _pooled_text_backend(access_token)
+
+
 def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) -> Iterator[str]:
     attempted_tokens: set[str] = set()
     token = getattr(backend, "access_token", "")
@@ -751,7 +777,15 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
                 model=request.model,
                 prompt=request.prompt,
                 thinking_effort=request.thinking_effort,
+                conversation_id=request.conversation_id,
+                parent_message_id=request.parent_message_id,
             ):
+                response_conversation_id = str(event.get("conversation_id") or "").strip()
+                response_parent_message_id = str(event.get("last_assistant_message_id") or "").strip()
+                if response_conversation_id:
+                    request.response_conversation_id = response_conversation_id
+                if response_parent_message_id:
+                    request.response_parent_message_id = response_parent_message_id
                 if event.get("type") != "conversation.delta":
                     continue
                 delta = str(event.get("delta") or "")
@@ -763,6 +797,8 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
         except Exception as exc:
             error_message = str(exc)
             if token and not emitted and is_token_invalid_error(error_message):
+                if request.conversation_id:
+                    raise RuntimeError("continuation account is unavailable") from exc
                 stale_token = token
                 refreshed_token = account_service.refresh_access_token(token, force=True, event="text_stream")
                 if refreshed_token and refreshed_token != token and refreshed_token not in attempted_tokens:

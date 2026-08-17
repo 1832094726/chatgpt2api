@@ -2,6 +2,9 @@
 
 ## Unreleased
 
++ [新增] Responses 文本接口支持 `previous_response_id`，将后续请求固定到原 ChatGPT 账号并复用同一网页 Conversation。
++ [新增] 续接状态保存上游 Conversation ID 与最后一条可见 assistant message ID；并发复用、游标失效和模型变化会明确拒绝。
++ [修复] Responses 文本请求不再复用聊天补全缓存，避免不同客户端共享同一个 response ID 或网页 Conversation。
 + [优化] 文本请求按账号复用上游 Session 和 TLS/HTTP 连接，15 分钟内复用首页 PoW 预热数据。
 + [优化] 当前轮被上游接受后异步预取下一枚一次性 chat requirements token，降低连续请求首字延迟。
 + [修复] Anthropic 文本兼容入口统一使用相同的连接池，避免额外创建未使用的上游 Session。
